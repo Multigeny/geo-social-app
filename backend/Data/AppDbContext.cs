@@ -22,6 +22,17 @@ namespace backend.Data
         {
             base.OnModelCreating(modelBuilder);
 
+
+            modelBuilder.Entity<User>()
+                .HasIndex(u => u.Email)
+                .IsUnique();
+
+                
+            modelBuilder.Entity<User>()
+                .Property(u => u.PasswordHash)
+                .IsRequired();
+
+
             // У одного пользователя может быть только одна текущая позиция.
             modelBuilder.Entity<CurrentLocation>()
                 .HasIndex(l => l.UserId)

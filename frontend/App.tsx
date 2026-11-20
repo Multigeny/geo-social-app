@@ -14,7 +14,10 @@ import {
   Marker,
 } from '@maplibre/maplibre-react-native';
 
-import { API_URL, API_KEY } from './config.local';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import ServerSetup from './ServerSetup';
+
+import { API_KEY } from './config.local';
 
 
 const USER_ID = 1;
@@ -40,6 +43,35 @@ type CurrentLocation = {
 };
 
 export default function App() {
+
+  const [apiUrl, setApiUrl] = useState('');
+  const [configLoaded, setConfigLoaded] = useState(false);
+  const [isEditingServer, setIsEditingServer] = useState(false);
+
+  useEffect(() => {
+  const loadServer = async () => {
+    try {
+      const savedUrl = await AsyncStorage.getItem('API_URL');
+
+      if (savedUrl) {
+        setApiUrl(savedUrl);
+      }
+    } catch (error) {
+      console.error('Ошибка загрузки адреса сервера:', error);
+    } finally {
+      setConfigLoaded(true);
+    }
+  };
+
+  loadServer();
+  }, []);
+
+  const handleServerConnected = async (url: string) => {
+      await AsyncStorage.setItem('API_URL', url);
+    setApiUrl(url);
+    setIsEditingServer(false);
+    };
+
   const [hasLocationPermission, setHasLocationPermission] =
     useState(false);
 
@@ -118,7 +150,7 @@ export default function App() {
       isSending = true;
 
       try {
-        const response = await fetch(`${API_URL}/api/locations`, {
+        const response = await fetch(`${apiUrl}/api/locations`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -220,7 +252,7 @@ export default function App() {
 
       console.log('GPS tracking stopped');
     };
-  }, [hasLocationPermission, isFollowing]);
+  }, [hasLocationPermission, isFollowing, apiUrl]);
 
 
 
@@ -230,7 +262,7 @@ export default function App() {
     const loadCurrentLocations = async () => {
       try {
         const response = await fetch(
-          `${API_URL}/api/locations/current`,
+          `${apiUrl}/api/locations/current`,
           {
             method: 'GET',
             headers: {
@@ -281,7 +313,7 @@ export default function App() {
       isActive = false;
       clearInterval(intervalId);
     };
-  }, []);
+  }, [apiUrl]);
 
   // Кнопка включения и отключения слежения.
   const handleLocationPress = () => {
@@ -296,12 +328,26 @@ export default function App() {
     setIsFollowing(previous => !previous);
   };
 
+  if (!configLoaded) {
   return (
     <View style={styles.container}>
-      <Map
-        style={styles.map}
-        mapStyle="https://tiles.openfreemap.org/styles/liberty"
-      >
+      <Text>Загрузка настроек...</Text>
+    </View>
+  );
+}
+
+if (!apiUrl || isEditingServer) {
+  return (
+    <ServerSetup
+      initialUrl={apiUrl || 'http://192.168.1.119:8080'}
+      onConnected={handleServerConnected}
+    />
+  );
+}
+
+  return (
+    <View style={styles.container}>
+      <Map style={styles.map} mapStyle="https://tiles.openfreemap.org/styles/liberty">
         <Camera
           initialViewState={{
             center: [65.5343, 57.1530],
@@ -359,7 +405,10 @@ export default function App() {
           </Marker>
         ))}
       </Map>
-
+        <Pressable
+            style={styles.serverButton} onPress={() => setIsEditingServer(true)}>
+            <Text style={styles.buttonText}>Сервер</Text>
+      </Pressable>
       <Pressable
         style={styles.locationButton}
         onPress={handleLocationPress}
@@ -439,6 +488,17 @@ const styles = StyleSheet.create({
     borderColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
+    elevation: 5,
+  },
+
+  serverButton: {
+    position: 'absolute',
+    top: 50,
+    right: 16,
+    backgroundColor: '#475569',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 10,
     elevation: 5,
   },
 
