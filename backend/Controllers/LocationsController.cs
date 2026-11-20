@@ -1,13 +1,15 @@
-﻿
-using backend.Data;
+﻿using backend.Data;
 using backend.models;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
 
 namespace backend.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
+    [Authorize]
     public class LocationsController : ControllerBase
     {
         private readonly AppDbContext _context;
@@ -22,8 +24,10 @@ namespace backend.Controllers
         public async Task<ActionResult<CurrentLocation>> CreateLocation(
             CreateLocationRequest request)
         {
-            if (request.UserId <= 0)
-                return BadRequest("Некорректный UserId.");
+            var userIdClaim = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            if (!int.TryParse(userIdClaim, out var userId) || userId <= 0)
+                return Unauthorized("Не удалось определить пользователя.");
 
             if (request.Latitude < -90 || request.Latitude > 90)
                 return BadRequest("Некорректная широта.");
@@ -34,22 +38,16 @@ namespace backend.Controllers
             if (request.Accuracy < 0)
                 return BadRequest("Некорректная точность GPS.");
 
-            var userExists = await _context.Users
-                .AnyAsync(u => u.Id == request.UserId);
-
-            if (!userExists)
-                return NotFound("Пользователь не найден.");
-
             var now = DateTimeOffset.UtcNow;
 
             var currentLocation = await _context.CurrentLocations
-                .FirstOrDefaultAsync(l => l.UserId == request.UserId);
+                .FirstOrDefaultAsync(l => l.UserId == userId);
 
             if (currentLocation == null)
             {
                 currentLocation = new CurrentLocation
                 {
-                    UserId = request.UserId,
+                    UserId = userId,
                     Latitude = request.Latitude,
                     Longitude = request.Longitude,
                     Accuracy = request.Accuracy,
@@ -67,7 +65,7 @@ namespace backend.Controllers
             }
 
             var latestHistory = await _context.LocationHistory
-                .Where(l => l.UserId == request.UserId)
+                .Where(l => l.UserId == userId)
                 .OrderByDescending(l => l.RecordedAt)
                 .FirstOrDefaultAsync();
 
@@ -76,7 +74,7 @@ namespace backend.Controllers
             {
                 var historyLocation = new LocationHistory
                 {
-                    UserId = request.UserId,
+                    UserId = userId,
                     Latitude = request.Latitude,
                     Longitude = request.Longitude,
                     Accuracy = request.Accuracy,
@@ -93,33 +91,52 @@ namespace backend.Controllers
 
         // GET: api/locations/current
         [HttpGet("current")]
-        public async Task<ActionResult<List<CurrentLocationResponse>>> GetCurrentLocations()
+        public async Task<ActionResult<List<CurrentLocationResponse>>>
+            GetCurrentLocations()
         {
             var locations = await _context.CurrentLocations
-            .Select(l => new CurrentLocationResponse
-            {
-                UserId = l.UserId,
-                Latitude = l.Latitude,
-                Longitude = l.Longitude,
-                Accuracy = l.Accuracy,
-                RecordedAt = l.RecordedAt
-            }).ToListAsync();
+                .Select(l => new CurrentLocationResponse
+                {
+                    UserId = l.UserId,
+                    Latitude = l.Latitude,
+                    Longitude = l.Longitude,
+                    Accuracy = l.Accuracy,
+                    RecordedAt = l.RecordedAt
+                })
+                .ToListAsync();
 
-        return Ok(locations);
+            return Ok(locations);
         }
 
-        // GET: api/locations/history/1
+        // GET: api/locations/history/3
         [HttpGet("history/{userId}")]
-        public async Task<ActionResult<List<LocationHistory>>> GetLocationHistory(
-            [FromRoute] int userId)
+        public async Task<ActionResult<List<LocationHistoryResponse>>>
+            GetLocationHistory([FromRoute] int userId)
         {
+            var currentUserIdClaim =
+                User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            if (!int.TryParse(currentUserIdClaim, out var currentUserId))
+                return Unauthorized();
+
+            if (userId != currentUserId)
+                return Forbid();
+
             var historyStart = DateTimeOffset.UtcNow.AddDays(-7);
 
             var history = await _context.LocationHistory
                 .Where(l =>
-                    l.UserId == userId &&
+                    l.UserId == currentUserId &&
                     l.RecordedAt >= historyStart)
                 .OrderBy(l => l.RecordedAt)
+                .Select(l => new LocationHistoryResponse
+                {
+                    UserId = l.UserId,
+                    Latitude = l.Latitude,
+                    Longitude = l.Longitude,
+                    Accuracy = l.Accuracy,
+                    RecordedAt = l.RecordedAt
+                })
                 .ToListAsync();
 
             return Ok(history);
@@ -128,15 +145,12 @@ namespace backend.Controllers
 
     public class CreateLocationRequest
     {
-        public int UserId { get; set; }
-
         public double Latitude { get; set; }
 
         public double Longitude { get; set; }
 
         public double? Accuracy { get; set; }
     }
-
 
     public class CurrentLocationResponse
     {
@@ -150,5 +164,17 @@ namespace backend.Controllers
 
         public DateTimeOffset RecordedAt { get; set; }
     }
-}
 
+    public class LocationHistoryResponse
+    {
+        public int UserId { get; set; }
+
+        public double Latitude { get; set; }
+
+        public double Longitude { get; set; }
+
+        public double? Accuracy { get; set; }
+
+        public DateTimeOffset RecordedAt { get; set; }
+    }
+}

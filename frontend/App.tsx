@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Alert,
@@ -15,18 +16,23 @@ import {
 } from '@maplibre/maplibre-react-native';
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Keychain from 'react-native-keychain';
+
 import ServerSetup from './ServerSetup';
+import AuthScreen from './AuthScreen';
 
-import { API_KEY } from './config.local';
-
-
-const USER_ID = 1;
+const KEYCHAIN_SERVICE = 'geosocial.auth';
 
 const SEND_INTERVAL = 60000;
 const RETRY_INTERVAL = 5000;
-
-// Как часто загружать позиции других пользователей.
 const REFRESH_LOCATIONS_INTERVAL = 15000;
+
+type AuthResponse = {
+  userId: number;
+  name: string;
+  email: string;
+  token: string;
+};
 
 type LocationListener =
   Parameters<typeof LocationManager.addListener>[0];
@@ -43,34 +49,12 @@ type CurrentLocation = {
 };
 
 export default function App() {
-
   const [apiUrl, setApiUrl] = useState('');
   const [configLoaded, setConfigLoaded] = useState(false);
   const [isEditingServer, setIsEditingServer] = useState(false);
 
-  useEffect(() => {
-  const loadServer = async () => {
-    try {
-      const savedUrl = await AsyncStorage.getItem('API_URL');
-
-      if (savedUrl) {
-        setApiUrl(savedUrl);
-      }
-    } catch (error) {
-      console.error('Ошибка загрузки адреса сервера:', error);
-    } finally {
-      setConfigLoaded(true);
-    }
-  };
-
-  loadServer();
-  }, []);
-
-  const handleServerConnected = async (url: string) => {
-      await AsyncStorage.setItem('API_URL', url);
-    setApiUrl(url);
-    setIsEditingServer(false);
-    };
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthResponse | null>(null);
 
   const [hasLocationPermission, setHasLocationPermission] =
     useState(false);
@@ -78,17 +62,197 @@ export default function App() {
   const [isFollowing, setIsFollowing] = useState(false);
 
   const [otherUsers, setOtherUsers] =
-  useState<CurrentLocation[]>([]);
+    useState<CurrentLocation[]>([]);
 
   const [myLocation, setMyLocation] =
-  useState<CurrentLocation | null>(null);
+    useState<CurrentLocation | null>(null);
+
   const latestPosition = useRef<LocationPosition | null>(null);
 
-  // Запрашиваем разрешение на геолокацию.
+  // Загружаем адрес API из локальных настроек.
   useEffect(() => {
+    const loadServer = async () => {
+      try {
+        const savedUrl = await AsyncStorage.getItem('API_URL');
+
+        if (savedUrl) {
+          setApiUrl(savedUrl);
+        }
+      } catch (error) {
+        console.error('Ошибка загрузки адреса сервера:', error);
+      } finally {
+        setConfigLoaded(true);
+      }
+    };
+
+    loadServer();
+  }, []);
+
+  // Сохраняем новый адрес API.
+  const handleServerConnected = async (url: string) => {
+    await AsyncStorage.setItem('API_URL', url);
+
+    setApiUrl(url);
+    setAuthUser(null);
+    setAuthChecked(false);
+    setIsFollowing(false);
+    setMyLocation(null);
+    setOtherUsers([]);
+    setIsEditingServer(false);
+  };
+
+  // Восстанавливаем JWT и проверяем его через защищённый API.
+  useEffect(() => {
+    if (!configLoaded || !apiUrl) {
+      return;
+    }
+
+    let isActive = true;
+
+    const restoreSession = async () => {
+      setAuthChecked(false);
+
+      try {
+        const credentials = await Keychain.getGenericPassword({
+          service: KEYCHAIN_SERVICE,
+        });
+
+        if (!credentials) {
+          if (isActive) {
+            setAuthUser(null);
+            setAuthChecked(true);
+          }
+          return;
+        }
+
+        const userId = Number(credentials.username);
+        const token = credentials.password;
+
+        if (!Number.isInteger(userId) || userId <= 0 || !token) {
+          await Keychain.resetGenericPassword({
+            service: KEYCHAIN_SERVICE,
+          });
+
+          if (isActive) {
+            setAuthUser(null);
+            setAuthChecked(true);
+          }
+          return;
+        }
+
+        const response = await fetch(
+          `${apiUrl}/api/users/${userId}`,
+          {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          },
+        );
+
+        if (!response.ok) {
+          await Keychain.resetGenericPassword({
+            service: KEYCHAIN_SERVICE,
+          });
+
+          if (isActive) {
+            setAuthUser(null);
+          }
+          return;
+        }
+
+        const user = await response.json();
+
+        if (isActive) {
+          setAuthUser({
+            userId: user.id,
+            name: user.name,
+            email: user.email,
+            token,
+          });
+        }
+      } catch (error) {
+        console.error('Ошибка восстановления сессии:', error);
+
+        if (isActive) {
+          setAuthUser(null);
+        }
+      } finally {
+        if (isActive) {
+          setAuthChecked(true);
+        }
+      }
+    };
+
+    restoreSession();
+
+    return () => {
+      isActive = false;
+    };
+  }, [configLoaded, apiUrl]);
+
+  // Сохраняем результат успешной регистрации или входа.
+  const handleAuthenticated = async (result: AuthResponse) => {
+    await Keychain.setGenericPassword(
+      String(result.userId),
+      result.token,
+      {
+        service: KEYCHAIN_SERVICE,
+      },
+    );
+
+    setAuthUser(result);
+    setAuthChecked(true);
+  };
+
+  // Выход из аккаунта.
+  const handleLogout = () => {
+    Alert.alert(
+      'Выход из аккаунта',
+      'Завершить текущую сессию?',
+      [
+        {
+          text: 'Отмена',
+          style: 'cancel',
+        },
+        {
+          text: 'Выйти',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await Keychain.resetGenericPassword({
+                service: KEYCHAIN_SERVICE,
+              });
+            } catch (error) {
+              console.error('Ошибка удаления сессии:', error);
+            }
+
+            setIsFollowing(false);
+            setAuthUser(null);
+            setMyLocation(null);
+            setOtherUsers([]);
+          },
+        },
+      ],
+    );
+  };
+
+  // Запрашиваем разрешение на геолокацию только после входа.
+  useEffect(() => {
+    if (!authUser) {
+      setHasLocationPermission(false);
+      return;
+    }
+
+    let isActive = true;
+
     const requestLocationPermission = async () => {
       try {
         const granted = await LocationManager.requestPermissions();
+
+        if (!isActive) {
+          return;
+        }
 
         setHasLocationPermission(granted);
 
@@ -101,19 +265,25 @@ export default function App() {
       } catch (error) {
         console.error('Location permission error:', error);
 
-        Alert.alert(
-          'Ошибка геолокации',
-          'Не удалось запросить разрешение на местоположение.',
-        );
+        if (isActive) {
+          Alert.alert(
+            'Ошибка геолокации',
+            'Не удалось запросить разрешение на местоположение.',
+          );
+        }
       }
     };
 
     requestLocationPermission();
-  }, []);
 
-  // Получаем GPS и отправляем координаты на сервер.
+    return () => {
+      isActive = false;
+    };
+  }, [authUser]);
+
+  // Получаем GPS и отправляем координаты авторизованного пользователя.
   useEffect(() => {
-    if (!hasLocationPermission || !isFollowing) {
+    if (!authUser || !hasLocationPermission || !isFollowing) {
       return;
     }
 
@@ -141,7 +311,6 @@ export default function App() {
       const position = latestPosition.current;
 
       if (!position) {
-        console.log('Ожидаем первое GPS-определение');
         return;
       }
 
@@ -154,10 +323,9 @@ export default function App() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-Api-Key': API_KEY,
+            Authorization: `Bearer ${authUser.token}`,
           },
           body: JSON.stringify({
-            userId: USER_ID,
             latitude,
             longitude,
             accuracy,
@@ -172,7 +340,7 @@ export default function App() {
           const errorText = await response.text();
 
           console.error(
-            'API error:',
+            'Ошибка отправки координат:',
             response.status,
             errorText,
           );
@@ -207,18 +375,12 @@ export default function App() {
       latestPosition.current = position;
 
       setMyLocation({
-        userId: USER_ID,
+        userId: authUser.userId,
         latitude: position.coords.latitude,
         longitude: position.coords.longitude,
         accuracy: position.coords.accuracy ?? null,
         recordedAt: new Date().toISOString(),
       });
-
-      console.log(
-        'GPS:',
-        position.coords.latitude,
-        position.coords.longitude,
-      );
 
       if (!firstLocationReceived) {
         firstLocationReceived = true;
@@ -234,8 +396,6 @@ export default function App() {
       SEND_INTERVAL,
     );
 
-    console.log('GPS tracking started');
-
     return () => {
       isActive = false;
 
@@ -249,14 +409,16 @@ export default function App() {
       LocationManager.stop();
 
       latestPosition.current = null;
-
-      console.log('GPS tracking stopped');
     };
-  }, [hasLocationPermission, isFollowing, apiUrl]);
+  }, [authUser, hasLocationPermission, isFollowing, apiUrl]);
 
-
-
+  // Загружаем координаты всех пользователей для отображения на карте.
   useEffect(() => {
+    if (!authUser) {
+      setOtherUsers([]);
+      return;
+    }
+
     let isActive = true;
 
     const loadCurrentLocations = async () => {
@@ -266,30 +428,21 @@ export default function App() {
           {
             method: 'GET',
             headers: {
-              'X-Api-Key': API_KEY,
+              Authorization: `Bearer ${authUser.token}`,
             },
           },
         );
 
         if (!response.ok) {
-          throw new Error(
-            `API error: ${response.status}`,
-          );
+          throw new Error(`API error: ${response.status}`);
         }
 
         const locations: CurrentLocation[] =
           await response.json();
 
-        if (!isActive) {
-          return;
+        if (isActive) {
+          setOtherUsers(locations);
         }
-
-        setOtherUsers(locations);
-
-        console.log(
-          'Загружено позиций пользователей:',
-          locations.length,
-        );
       } catch (error) {
         if (isActive) {
           console.error(
@@ -300,10 +453,8 @@ export default function App() {
       }
     };
 
-    // Первый запрос выполняется сразу.
     loadCurrentLocations();
 
-    // Затем обновляем позиции каждые 15 секунд.
     const intervalId = setInterval(
       loadCurrentLocations,
       REFRESH_LOCATIONS_INTERVAL,
@@ -313,9 +464,9 @@ export default function App() {
       isActive = false;
       clearInterval(intervalId);
     };
-  }, [apiUrl]);
+  }, [authUser, apiUrl]);
 
-  // Кнопка включения и отключения слежения.
+  // Включение и отключение отправки координат.
   const handleLocationPress = () => {
     if (!hasLocationPermission) {
       Alert.alert(
@@ -329,25 +480,45 @@ export default function App() {
   };
 
   if (!configLoaded) {
+    return (
+      <View style={styles.loadingContainer}>
+        <Text>Загрузка настроек...</Text>
+      </View>
+    );
+  }
+
+  if (!apiUrl || isEditingServer) {
+    return (
+      <ServerSetup
+        initialUrl={apiUrl || 'http://192.168.1.119:8080'}
+        onConnected={handleServerConnected}
+      />
+    );
+  }
+
+  if (!authChecked) {
+    return (
+      <View style={styles.loadingContainer}>
+        <Text>Проверка авторизации...</Text>
+      </View>
+    );
+  }
+
+  if (!authUser) {
+    return (
+      <AuthScreen
+        apiUrl={apiUrl}
+        onAuthenticated={handleAuthenticated}
+      />
+    );
+  }
+
   return (
     <View style={styles.container}>
-      <Text>Загрузка настроек...</Text>
-    </View>
-  );
-}
-
-if (!apiUrl || isEditingServer) {
-  return (
-    <ServerSetup
-      initialUrl={apiUrl || 'http://192.168.1.119:8080'}
-      onConnected={handleServerConnected}
-    />
-  );
-}
-
-  return (
-    <View style={styles.container}>
-      <Map style={styles.map} mapStyle="https://tiles.openfreemap.org/styles/liberty">
+      <Map
+        style={styles.map}
+        mapStyle="https://tiles.openfreemap.org/styles/liberty"
+      >
         <Camera
           initialViewState={{
             center: [65.5343, 57.1530],
@@ -356,59 +527,59 @@ if (!apiUrl || isEditingServer) {
           trackUserLocation={isFollowing ? 'default' : undefined}
         />
 
-        {/* Собственная позиция */}
-{myLocation && (
-  <Marker
-    id="my-location"
-    lngLat={[
-      myLocation.longitude,
-      myLocation.latitude,
-    ]}
-    anchor="center"
-  >
-    <View style={styles.myMarker}>
-      <Text style={styles.markerText}>Я</Text>
-    </View>
-  </Marker>
-)}
-
-{/* Позиции остальных пользователей */}
-{otherUsers
-  .filter(user => user.userId !== USER_ID)
-  .map(user => (
-    <Marker
-      key={user.userId}
-      id={`user-${user.userId}`}
-      lngLat={[user.longitude, user.latitude]}
-      anchor="center"
-    >
-      <View style={styles.otherMarker}>
-        <Text style={styles.markerText}>
-          {user.userId}
-        </Text>
-      </View>
-    </Marker>
-  ))}
-
-        {otherUsers.map(user => (
+        {myLocation && (
           <Marker
-            key={user.userId}
-            id={`user-${user.userId}`}
-            lngLat={[user.longitude, user.latitude]}
+            id="my-location"
+            lngLat={[
+              myLocation.longitude,
+              myLocation.latitude,
+            ]}
             anchor="center"
           >
-            <View style={styles.userMarker}>
-              <Text style={styles.userMarkerText}>
-                {user.userId}
-              </Text>
+            <View style={styles.myMarker}>
+              <Text style={styles.markerText}>Я</Text>
             </View>
           </Marker>
-        ))}
+        )}
+
+        {otherUsers
+          .filter(user => user.userId !== authUser.userId)
+          .map(user => (
+            <Marker
+              key={user.userId}
+              id={`user-${user.userId}`}
+              lngLat={[user.longitude, user.latitude]}
+              anchor="center"
+            >
+              <View style={styles.otherMarker}>
+                <Text style={styles.markerText}>
+                  {user.userId}
+                </Text>
+              </View>
+            </Marker>
+          ))}
       </Map>
+
+      <View style={styles.topBar}>
+        <Text style={styles.userName}>
+          {authUser.name}
+        </Text>
+
         <Pressable
-            style={styles.serverButton} onPress={() => setIsEditingServer(true)}>
-            <Text style={styles.buttonText}>Сервер</Text>
-      </Pressable>
+          style={styles.smallButton}
+          onPress={() => setIsEditingServer(true)}
+        >
+          <Text style={styles.buttonText}>Сервер</Text>
+        </Pressable>
+
+        <Pressable
+          style={styles.smallButton}
+          onPress={handleLogout}
+        >
+          <Text style={styles.buttonText}>Выйти</Text>
+        </Pressable>
+      </View>
+
       <Pressable
         style={styles.locationButton}
         onPress={handleLocationPress}
@@ -428,8 +599,46 @@ const styles = StyleSheet.create({
     flex: 1,
   },
 
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+  },
+
   map: {
     flex: 1,
+  },
+
+  topBar: {
+    position: 'absolute',
+    top: 50,
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 8,
+  },
+
+  userName: {
+    flex: 1,
+    color: '#0F172A',
+    fontSize: 16,
+    fontWeight: '700',
+    backgroundColor: '#FFFFFF',
+    overflow: 'hidden',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+  },
+
+  smallButton: {
+    backgroundColor: '#475569',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    elevation: 5,
   },
 
   locationButton: {
@@ -445,29 +654,11 @@ const styles = StyleSheet.create({
 
   buttonText: {
     color: '#FFFFFF',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '600',
   },
 
-  userMarker: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: '#DC2626',
-    borderWidth: 3,
-    borderColor: '#FFFFFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    elevation: 5,
-  },
-
-  userMarkerText: {
-    color: '#FFFFFF',
-    fontSize: 13,
-    fontWeight: '700',
-  },
-
-    myMarker: {
+  myMarker: {
     width: 42,
     height: 42,
     borderRadius: 21,
@@ -488,17 +679,6 @@ const styles = StyleSheet.create({
     borderColor: '#FFFFFF',
     alignItems: 'center',
     justifyContent: 'center',
-    elevation: 5,
-  },
-
-  serverButton: {
-    position: 'absolute',
-    top: 50,
-    right: 16,
-    backgroundColor: '#475569',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 10,
     elevation: 5,
   },
 

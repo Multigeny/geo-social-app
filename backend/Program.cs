@@ -5,18 +5,11 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Swashbuckle.AspNetCore.SwaggerUI;
 using System.Text;
-using System.Security.Cryptography;
 using System.Text.Json.Serialization;
+using Microsoft.AspNetCore.Identity;
+using backend.models;
 
 var builder = WebApplication.CreateBuilder(args);
-
-// Временная проверка API-ключа для старых API-маршрутов.
-var apiKey = builder.Configuration["ApiKey"];
-if (string.IsNullOrWhiteSpace(apiKey))
-{
-    throw new InvalidOperationException(
-        "ApiKey is not configured. Set the ApiKey environment variable.");
-}
 
 // Настройки JWT.
 var jwtKey = builder.Configuration["Jwt:Key"];
@@ -52,6 +45,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 
 builder.Services.AddAuthorization();
+builder.Services.AddScoped<IPasswordHasher<User>, PasswordHasher<User>>();
 
 // Подключение к PostgreSQL.
 builder.Services.AddDbContext<AppDbContext>(options =>
@@ -90,37 +84,7 @@ if (app.Environment.IsDevelopment())
 // Публичная проверка состояния сервера.
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
-// Временная проверка API-ключа для старых маршрутов.
-// /api/auth освобождён от неё: там будет использоваться JWT.
-app.Use(async (context, next) =>
-{
-    var isApiRoute = context.Request.Path.StartsWithSegments("/api");
-    var isAuthRoute = context.Request.Path.StartsWithSegments("/api/auth");
 
-    if (isApiRoute && !isAuthRoute)
-    {
-        var providedKey = context.Request.Headers["X-Api-Key"].ToString();
-        var expectedBytes = Encoding.UTF8.GetBytes(apiKey);
-        var providedBytes = Encoding.UTF8.GetBytes(providedKey);
-
-        bool isValid =
-            providedBytes.Length == expectedBytes.Length &&
-            CryptographicOperations.FixedTimeEquals(
-                providedBytes, expectedBytes);
-
-        if (!isValid)
-        {
-            context.Response.StatusCode = 401;
-            await context.Response.WriteAsJsonAsync(new
-            {
-                error = "Invalid or missing API key"
-            });
-            return;
-        }
-    }
-
-    await next();
-});
 
 if (!app.Environment.IsDevelopment())
 {
